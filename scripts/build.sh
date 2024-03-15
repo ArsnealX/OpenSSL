@@ -28,7 +28,12 @@ IPHONEOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 IPHONESIMULATOR_SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
 OSX_SDK=$(xcrun --sdk macosx --show-sdk-path)
 
-export MACOSX_DEPLOYMENT_TARGET="10.14" # 
+export MACOSX_DEPLOYMENT_TARGET="10.14"
+
+export XROS_DEPLOYMENT_VERSION="1.0"
+XROS_SDK=$(xcrun --sdk xros --show-sdk-path)
+XRSIMULATOR_SDK=$(xcrun --sdk xrsimulator --show-sdk-path) # 
+
 
 # Turn versions like 1.2.3 into numbers that can be compare by bash.
 version()
@@ -58,6 +63,12 @@ configure() {
       MacOSX_Catalyst)
 	 SDK="${OSX_SDK}"
 	 ;;
+      xrOS)
+	 SDK="${XROS_SDK}"
+	 ;;
+      xrSimulator)
+	 SDK="${XRSIMULATOR_SDK}"
+	 ;;
       *)
 	 echo "Unsupported OS '${OS}'!" >&1
 	 exit 1
@@ -82,6 +93,10 @@ configure() {
       ${SRC_DIR}/Configure ios-sim-cross-$ARCH no-asm no-shared --prefix="${PREFIX}" &> "${PREFIX}.config.log"
    elif [ "$OS" == "iPhoneOS" ]; then
       ${SRC_DIR}/Configure ios-cross-$ARCH no-asm no-shared --prefix="${PREFIX}" &> "${PREFIX}.config.log"
+   elif [ "$OS" == "xrSimulator" ]; then
+      ${SRC_DIR}/Configure xros-sim-cross-$ARCH no-asm no-shared --prefix="${PREFIX}" &> "${PREFIX}.config.log"
+   elif [ "$OS" == "xrOS" ]; then
+      ${SRC_DIR}/Configure xros-cross-$ARCH no-asm no-shared --prefix="${PREFIX}" &> "${PREFIX}.config.log"
    fi
 }
 
@@ -260,6 +275,62 @@ build_catalyst() {
    rm -rf ${TMP_BUILD_DIR}
 }
 
+build_xros() {
+   local TMP_BUILD_DIR=$( mktemp -d )
+
+   # Clean up whatever was left from our previous build
+   rm -rf "${SCRIPT_DIR}"/../{xrsimulator/include,xrsimulator/lib}
+   mkdir -p "${SCRIPT_DIR}"/../{xrsimulator/include,xrsimulator/lib}
+
+   build "x86_64" "xrSimulator" ${TMP_BUILD_DIR} "xrsimulator"
+   build "arm64" "xrSimulator" ${TMP_BUILD_DIR} "xrsimulator"
+   # The World is not ready for arm64e!
+   # build "arm64e" "xrSimulator" ${TMP_BUILD_DIR} "xrsimulator"
+
+   rm -rf "${SCRIPT_DIR}"/../{xros/include,xros/lib}
+   mkdir -p "${SCRIPT_DIR}"/../{xros/include,xros/lib}
+
+   build "arm64" "xrOS" ${TMP_BUILD_DIR} "xros"
+   # The World is not ready for arm64e!
+   # build "arm64e" "xrOS" ${TMP_BUILD_DIR} "xros"
+
+   ditto "${TMP_BUILD_DIR}/${OPENSSL_VERSION}-xrOS-arm64/include/openssl" "${SCRIPT_DIR}/../xros/include/${FWNAME}"
+   cp -f "${SCRIPT_DIR}/../shim/shim.h" "${SCRIPT_DIR}/../xros/include/${FWNAME}/shim.h"
+
+   # Copy headers
+   ditto "${TMP_BUILD_DIR}/${OPENSSL_VERSION}-xrSimulator-arm64/include/openssl" "${SCRIPT_DIR}/../xrsimulator/include/${FWNAME}"
+   cp -f "${SCRIPT_DIR}/../shim/shim.h" "${SCRIPT_DIR}/../xrsimulator/include/${FWNAME}/shim.h"
+
+   # fix inttypes.h
+   find "${SCRIPT_DIR}/../xros/include/${FWNAME}" -type f -name "*.h" -exec sed -i "" -e "s/include <inttypes\.h>/include <sys\/types\.h>/g" {} \;
+   find "${SCRIPT_DIR}/../xrsimulator/include/${FWNAME}" -type f -name "*.h" -exec sed -i "" -e "s/include <inttypes\.h>/include <sys\/types\.h>/g" {} \;
+
+   local OPENSSLCONF_PATH="${SCRIPT_DIR}/../xrsimulator/include/${FWNAME}/opensslconf.h"
+   echo "#if defined(__APPLE__) && defined (__x86_64__)" >> ${OPENSSLCONF_PATH}
+   cat ${TMP_BUILD_DIR}/${OPENSSL_VERSION}-xrSimulator-x86_64/include/openssl/opensslconf.h >> ${OPENSSLCONF_PATH}
+   # The World is not ready for arm64e!
+   # echo "#elif defined(__APPLE__) && defined (__arm64e__)" >> ${OPENSSLCONF_PATH}
+   # cat ${TMP_BUILD_DIR}/${OPENSSL_VERSION}-xrSimulator-arm64e/include/openssl/opensslconf.h >> ${OPENSSLCONF_PATH}
+   echo "#elif defined(__APPLE__) && defined (__arm64__)" >> ${OPENSSLCONF_PATH}
+   cat ${TMP_BUILD_DIR}/${OPENSSL_VERSION}-xrSimulator-arm64/include/openssl/opensslconf.h >> ${OPENSSLCONF_PATH}
+   echo "#endif" >> ${OPENSSLCONF_PATH}
+
+   OPENSSLCONF_PATH="${SCRIPT_DIR}/../xros/include/${FWNAME}/opensslconf.h"
+   echo "#if defined(__APPLE__) && defined (__x86_64__)" >> ${OPENSSLCONF_PATH}
+   # The World is not ready for arm64e!
+   # echo "#elif defined(__APPLE__) && defined (__arm64e__)" >> ${OPENSSLCONF_PATH}
+   # cat ${TMP_BUILD_DIR}/${OPENSSL_VERSION}-xrOS-arm64e/include/openssl/opensslconf.h >> ${OPENSSLCONF_PATH}
+   echo "#elif defined(__APPLE__) && defined (__arm64__)" >> ${OPENSSLCONF_PATH}
+   cat ${TMP_BUILD_DIR}/${OPENSSL_VERSION}-xrOS-arm64/include/openssl/opensslconf.h >> ${OPENSSLCONF_PATH}
+   echo "#endif" >> ${OPENSSLCONF_PATH}
+   
+   # Update include "openssl/" to "OpenSSL/"
+   grep -rl '#\s*include\s*<openssl' --include \*.h ${SCRIPT_DIR}/../xros/include | xargs -I@ sed -i '' -e 's/#[[:space:]]*include[[:space:]]*<openssl/#include <OpenSSL/gi' @
+   grep -rl '#\s*include\s*<openssl' --include \*.h ${SCRIPT_DIR}/../xrsimulator/include | xargs -I@ sed -i '' -e 's/#[[:space:]]*include[[:space:]]*<openssl/#include <OpenSSL/gi' @
+
+   rm -rf ${TMP_BUILD_DIR}
+}
+
 # Start
 
 if [ ! -f "${SCRIPT_DIR}/../openssl-${OPENSSL_VERSION}.tar.gz" ]; then
@@ -278,3 +349,4 @@ fi
 build_ios
 build_macos
 build_catalyst
+build_xros
